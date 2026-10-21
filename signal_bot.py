@@ -22,6 +22,13 @@ SYMBOLS = ["XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]
 TF_MIN = 15
 STATE_FILE = "state.json"
 
+# Per-symbol configuration
+SYMBOL_CFG = {
+    "XAU/USD": {"sl_buffer": 0.50, "decimals": 2},
+    "EUR/USD": {"sl_buffer": 0.0005, "decimals": 5},
+    "GBP/USD": {"sl_buffer": 0.0005, "decimals": 5},
+    "USD/JPY": {"sl_buffer": 0.05, "decimals": 3},
+}
 
 # ---------------------------------------------------------------- donnees
 def fetch(symbol, interval, size, key):
@@ -100,16 +107,28 @@ def detect(cs, i, top, bot, cfg):
 
 
 # ---------------------------------------------------------------- simulation de la journee
-def lot_size(entry, sl, account, risk_pct):
+def lot_size(entry, sl, account, risk_pct, symbol):
     dist = abs(entry - sl)
     if dist <= 0:
         return 0.01
-    lot = (account * risk_pct / 100.0) / (dist * 100.0)
+
+    risk_usd = account * risk_pct / 100.0
+
+    if symbol == "XAU/USD":
+        lot = risk_usd / (dist * 100.0)
+    elif symbol in ["EUR/USD", "GBP/USD"]:
+        lot = risk_usd / (dist * 100000.0)
+    elif symbol == "USD/JPY":
+        lot = (risk_usd * entry) / (dist * 100000.0)
+    else:
+        lot = risk_usd / (dist * 100.0)
+
     return max(0.01, math.floor(lot * 100) / 100.0)
 
 
-def simulate(cs, top, bot, day, cfg, account=1000.0, risk_pct=1.0):
+def simulate(cs, top, bot, day, cfg, account=1000.0, risk_pct=1.0, symbol="XAU/USD"):
     """cs = bougies M15 FERMEES (anciennes -> recentes). Retourne la liste d'evenements du jour."""
+    sl_buffer = SYMBOL_CFG[symbol]["sl_buffer"]
     ev = []
     pos = None; pend = None; trades = 0
     for k, c in enumerate(cs):
@@ -136,8 +155,9 @@ def simulate(cs, top, bot, day, cfg, account=1000.0, risk_pct=1.0):
             broke = (c["l"] < pend["trigger"]) if d == -1 else (c["h"] > pend["trigger"])
             if broke and c["t"].hour < cfg["trade_end_hour"] and trades < cfg["max_trades"]:
                 trades += 1
-                pos = dict(dir=d, name=pend["name"], entry=pend["trigger"], sl=pend["sl"], tp=pend["tp"],
-                           lot=lot_size(pend["trigger"], pend["sl"], account, risk_pct))
+                pos = dict(dir=d, name=pend["name"], entry=pend["trigger"], sl=pend["sl"],
+                           tp=pend["tp"],
+                           lot=lot_size(pend["trigger"], pend["sl"], account, risk_pct, symbol))
                 ev.append(dict(type="entry", t=close_t, key="%s-entry-%s" % (day, c["t"]), pos=pos))
                 pend = None
                 # meme bougie: SL/TP deja touche ? (prudent)
@@ -155,7 +175,7 @@ def simulate(cs, top, bot, day, cfg, account=1000.0, risk_pct=1.0):
             if r:
                 d, name, eh, el = r
                 trig = el if d == -1 else eh
-                sl = eh + cfg["sl_buffer"] if d == -1 else el - cfg["sl_buffer"]
+                sl = eh + sl_buffer if d == -1 else el - sl_buffer
                 tp = bot if d == -1 else top
                 pend = dict(dir=d, name=name, trigger=trig, sl=sl, tp=tp, bars=cfg["expiry_bars"], t=close_t)
                 ev.append(dict(type="setup", t=close_t, key="%s-setup-%s" % (day, c["t"]), pend=dict(pend)))
@@ -164,17 +184,22 @@ def simulate(cs, top, bot, day, cfg, account=1000.0, risk_pct=1.0):
 
 # ---------------------------------------------------------------- messages
 def fmt(symbol, e, top, bot):
-    box = "BOX %.2f - %.2f" % (bot, top)
+    decimals = SYMBOL_CFG[symbol]["decimals"]
+    fmt_str = "%%.%df" % decimals
+    box = "BOX %s - %s" % (fmt_str % bot, fmt_str % top)
     if e["type"] == "setup":
         p = e["pend"]; side = "SELL" if p["dir"] == -1 else "BUY"
         order = "SELL STOP" if p["dir"] == -1 else "BUY STOP"
-        lot = lot_size(p["trigger"], p["sl"], float(os.environ.get("ACCOUNT_USD", 1000)), float(os.environ.get("RISK_PCT", 1)))
+        lot = lot_size(p["trigger"], p["sl"], float(os.environ.get("ACCOUNT_USD", 1000)),
+                       float(os.environ.get("RISK_PCT", 1)), symbol)
         until = (p["t"] + timedelta(minutes=TF_MIN * CFG["expiry_bars"])).strftime("%H:%M")
-        return ("BOX V3 SETUP %s %s M15\nPattern: %s\nPlace un %s a %.2f\nSL %.2f\nTP %.2f\nLOT %.2f\n"
-                "Valable jusqu'a %s UTC (sinon annule)\n%s") % (side, symbol, p["name"], order, p["trigger"], p["sl"], p["tp"], lot, until, box)
+        return ("BOX V3 SETUP %s %s M15\nPattern: %s\nPlace un %s a %s\nSL %s\nTP %s\nLOT %.2f\n"
+                "Valable jusqu'a %s UTC (sinon annule)\n%s") % (side, symbol, p["name"], order,
+                fmt_str % p["trigger"], fmt_str % p["sl"], fmt_str % p["tp"], lot, until, box)
     if e["type"] == "entry":
         p = e["pos"]; side = "SELL" if p["dir"] == -1 else "BUY"
-        return "BOX V3 DECLENCHE %s %s (cassure) @ %.2f\nSL %.2f | TP %.2f | LOT %.2f" % (side, symbol, p["entry"], p["sl"], p["tp"], p["lot"])
+        return "BOX V3 DECLENCHE %s %s (cassure) @ %s\nSL %s | TP %s | LOT %.2f" % (side, symbol,
+                fmt_str % p["entry"], fmt_str % p["sl"], fmt_str % p["tp"], p["lot"])
     if e["type"] == "close":
         p = e["pos"]; side = "SELL" if p["dir"] == -1 else "BUY"
         return "BOX V3 %s %s ferme: %s" % (side, symbol, e["res"])
@@ -224,9 +249,11 @@ def main():
                 continue
 
             top, bot = prev[-1]["h"], prev[-1]["l"]
-            ev = simulate(cs, top, bot, today, CFG, account, risk_pct)
+            ev = simulate(cs, top, bot, today, CFG, account, risk_pct, symbol)
 
-            print("BOX %s %.2f-%.2f | evenements: %d" % (symbol, bot, top, len(ev)))
+            decimals = SYMBOL_CFG[symbol]["decimals"]
+            fmt_str = "%%.%df" % decimals
+            print("BOX %s %s-%s | evenements: %d" % (symbol, fmt_str % bot, fmt_str % top, len(ev)))
 
             for e in ev:
                 key_id = "%s:%s" % (symbol, e["key"])  # clef unique par symbole
