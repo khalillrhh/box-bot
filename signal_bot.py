@@ -4,10 +4,12 @@ Tourne toutes les 15 min sur GitHub Actions. Aucun ordre n'est place: SIGNAUX se
 Les regles sont les memes que BoxTheory_V3.mq5.
 Secrets (variables d'environnement): TWELVE_KEY, TG_TOKEN, TG_CHAT_ID
 Optionnel: ACCOUNT_USD (defaut 1000), RISK_PCT (defaut 1)
+4 symboles: XAU/USD, EUR/USD, GBP/USD, USD/JPY avec etat separe par symbole.
 """
 import json, os, sys, math
 from datetime import datetime, timedelta, timezone
 import requests
+
 
 CFG = dict(
     zone_pct=10.0, wick_to_body=2.0, opp_wick_max=1.0,
@@ -16,18 +18,18 @@ CFG = dict(
     trade_end_hour=22, close_hour=23, min_body=0.01,
     use_wick=True, use_pitch=True, use_tower=True,
 )
-SYMBOL = "XAU/USD"
+SYMBOLS = ["XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]
 TF_MIN = 15
 STATE_FILE = "state.json"
 
 
 # ---------------------------------------------------------------- donnees
-def fetch(interval, size, key):
+def fetch(symbol, interval, size, key):
     r = requests.get("https://api.twelvedata.com/time_series", params=dict(
-        symbol=SYMBOL, interval=interval, outputsize=size, timezone="UTC", apikey=key), timeout=30)
+        symbol=symbol, interval=interval, outputsize=size, timezone="UTC", apikey=key), timeout=30)
     j = r.json()
     if j.get("status") == "error" or "values" not in j:
-        raise RuntimeError("Twelve Data: %s" % j)
+        raise RuntimeError("Twelve Data (%s): %s" % (symbol, j))
     out = []
     for v in reversed(j["values"]):  # du plus ancien au plus recent
         t = datetime.strptime(v["datetime"][:19].replace("T", " "),
@@ -161,24 +163,24 @@ def simulate(cs, top, bot, day, cfg, account=1000.0, risk_pct=1.0):
 
 
 # ---------------------------------------------------------------- messages
-def fmt(e, top, bot):
+def fmt(symbol, e, top, bot):
     box = "BOX %.2f - %.2f" % (bot, top)
     if e["type"] == "setup":
         p = e["pend"]; side = "SELL" if p["dir"] == -1 else "BUY"
         order = "SELL STOP" if p["dir"] == -1 else "BUY STOP"
         lot = lot_size(p["trigger"], p["sl"], float(os.environ.get("ACCOUNT_USD", 1000)), float(os.environ.get("RISK_PCT", 1)))
         until = (p["t"] + timedelta(minutes=TF_MIN * CFG["expiry_bars"])).strftime("%H:%M")
-        return ("BOX V3 SETUP %s XAUUSD M15\nPattern: %s\nPlace un %s a %.2f\nSL %.2f\nTP %.2f\nLOT %.2f\n"
-                "Valable jusqu'a %s UTC (sinon annule)\n%s") % (side, p["name"], order, p["trigger"], p["sl"], p["tp"], lot, until, box)
+        return ("BOX V3 SETUP %s %s M15\nPattern: %s\nPlace un %s a %.2f\nSL %.2f\nTP %.2f\nLOT %.2f\n"
+                "Valable jusqu'a %s UTC (sinon annule)\n%s") % (side, symbol, p["name"], order, p["trigger"], p["sl"], p["tp"], lot, until, box)
     if e["type"] == "entry":
         p = e["pos"]; side = "SELL" if p["dir"] == -1 else "BUY"
-        return "BOX V3 DECLENCHE %s (cassure) @ %.2f\nSL %.2f | TP %.2f | LOT %.2f" % (side, p["entry"], p["sl"], p["tp"], p["lot"])
+        return "BOX V3 DECLENCHE %s %s (cassure) @ %.2f\nSL %.2f | TP %.2f | LOT %.2f" % (side, symbol, p["entry"], p["sl"], p["tp"], p["lot"])
     if e["type"] == "close":
         p = e["pos"]; side = "SELL" if p["dir"] == -1 else "BUY"
-        return "BOX V3 %s ferme: %s" % (side, e["res"])
+        return "BOX V3 %s %s ferme: %s" % (side, symbol, e["res"])
     if e["type"] == "cancel":
         p = e["pend"]; side = "SELL" if p["dir"] == -1 else "BUY"
-        return "BOX V3 setup %s annule: %s" % (side, e["why"])
+        return "BOX V3 setup %s %s annule: %s" % (side, symbol, e["why"])
     return str(e)
 
 
@@ -197,28 +199,48 @@ def main():
         tg(token, chat, "BOX V3: test OK (le bot est bien relie a Telegram)")
         return
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    m15 = fetch("15min", 200, key)
-    daily = fetch("1day", 5, key)
-    cs = [c for c in m15 if c["t"] + timedelta(minutes=TF_MIN) <= now]      # bougies fermees
+    account = float(os.environ.get("ACCOUNT_USD", 1000))
+    risk_pct = float(os.environ.get("RISK_PCT", 1))
     today = now.date()
-    prev = [d for d in daily if d["t"].date() < today]
-    if not prev or len(cs) < 30:
-        print("Pas assez de donnees"); return
-    top, bot = prev[-1]["h"], prev[-1]["l"]
-    ev = simulate(cs, top, bot, today, CFG, float(os.environ.get("ACCOUNT_USD", 1000)), float(os.environ.get("RISK_PCT", 1)))
+
+    # Charge l'etat persistant (par symbole)
     state = {}
     if os.path.exists(STATE_FILE):
         try: state = json.load(open(STATE_FILE))
         except Exception: state = {}
     state = {k: v for k, v in state.items() if k[:10] >= str(today - timedelta(days=3))}
-    print("Box %.2f-%.2f | evenements aujourd'hui: %d" % (bot, top, len(ev)))
-    for e in ev:
-        if e["key"] in state:
+
+    # Traite chaque symbole (2 requetes par symbole: 15min + 1day)
+    for symbol in SYMBOLS:
+        try:
+            m15 = fetch(symbol, "15min", 200, key)
+            daily = fetch(symbol, "1day", 5, key)
+
+            cs = [c for c in m15 if c["t"] + timedelta(minutes=TF_MIN) <= now]      # bougies fermees
+            prev = [d for d in daily if d["t"].date() < today]
+
+            if not prev or len(cs) < 30:
+                print("Pas assez de donnees pour %s" % symbol)
+                continue
+
+            top, bot = prev[-1]["h"], prev[-1]["l"]
+            ev = simulate(cs, top, bot, today, CFG, account, risk_pct)
+
+            print("BOX %s %.2f-%.2f | evenements: %d" % (symbol, bot, top, len(ev)))
+
+            for e in ev:
+                key_id = "%s:%s" % (symbol, e["key"])  # clef unique par symbole
+                if key_id in state:
+                    continue
+                if now - e["t"] > timedelta(minutes=60):      # evenement trop ancien: on ne spamme pas
+                    state[key_id] = "old"; continue
+                if tg(token, chat, fmt(symbol, e, top, bot)):
+                    state[key_id] = "sent"
+
+        except Exception as ex:
+            print("Erreur pour %s: %s" % (symbol, ex))
             continue
-        if now - e["t"] > timedelta(minutes=60):      # evenement trop ancien: on ne spamme pas
-            state[e["key"]] = "old"; continue
-        if tg(token, chat, fmt(e, top, bot)):
-            state[e["key"]] = "sent"
+
     json.dump(state, open(STATE_FILE, "w"), indent=1)
 
 
