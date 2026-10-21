@@ -1,0 +1,35 @@
+name: box-v3-signals
+on:
+  schedule:
+    - cron: "*/15 0-22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "1 = envoyer seulement un message test"
+        default: "0"
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Run bot
+        env:
+          TWELVE_KEY: ${{ secrets.TWELVE_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          ACCOUNT_USD: "1000"
+          RISK_PCT: "1"
+          TEST: ${{ github.event.inputs.test }}
+        run: python signal_bot.py
+      - name: Save state
+        run: |
+          git config user.name "box-bot"
+          git config user.email "box-bot@users.noreply.github.com"
+          git add state.json || true
+          git diff --cached --quiet || (git commit -m "state" && git push)
