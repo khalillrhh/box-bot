@@ -8,6 +8,11 @@
 # attaches and prints the account info, confirming a DEMO account.
 # It never places an order.
 #
+# v4 adds an always-run DIAGNOSTICS step: run #3 failed with the same
+# IPC timeout even against a warm terminal, so before any more blind
+# fixes this run dumps the terminal process state and the terminal's
+# own log files — the evidence that says why IPC never comes up.
+#
 # Lives in the repo at .github/workflows/exec.yml, with login_proof.py
 # at repo root. The startup config (which contains the password) is
 # generated on the runner in RUNNER_TEMP — never in the repo.
@@ -72,9 +77,9 @@ jobs:
           "@ | Set-Content -Path $cfg -Encoding ASCII
           $term = "C:\Program Files\MetaTrader 5\terminal64.exe"
           Start-Process -FilePath $term -ArgumentList "/config:$cfg"
-          Write-Host "Terminal launched with auto-login config; settling 150s ..."
-          Start-Sleep -Seconds 150
-          Get-Process terminal64 -ErrorAction SilentlyContinue | Select-Object Id, ProcessName
+          Write-Host "Terminal launched with auto-login config; settling 240s ..."
+          Start-Sleep -Seconds 240
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, StartTime
 
       - name: Run login proof (no trading)
         env:
@@ -82,3 +87,24 @@ jobs:
           MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
           MT5_SERVER: ${{ secrets.MT5_SERVER }}
         run: python login_proof.py
+
+      - name: Diagnostics — terminal process + its own logs (always runs)
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "=== terminal64 process state ==="
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, StartTime, Responding
+          Write-Host "=== terminal data folders ==="
+          $base = "$env:APPDATA\MetaQuotes\Terminal"
+          if (Test-Path $base) {
+            Get-ChildItem $base -Directory | Select-Object FullName
+            Write-Host "=== newest log files (tails) ==="
+            $logs = Get-ChildItem $base -Recurse -Filter *.log -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 3
+            foreach ($l in $logs) {
+              Write-Host "--- $($l.FullName) (modified $($l.LastWriteTime)) ---"
+              Get-Content $l.FullName -Tail 60 -ErrorAction SilentlyContinue
+            }
+          } else {
+            Write-Host "No terminal data folder at $base"
+          }
