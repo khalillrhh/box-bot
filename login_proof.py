@@ -8,23 +8,29 @@ account info, verifies the account is a DEMO account, and shuts down.
 There is deliberately NO order function in this file. Milestone 1 proves
 the connection only — nothing is traded, opened, modified, or closed.
 
-Credentials come from the environment (GitHub Actions secrets in CI,
-added by raymond himself — never hardcoded, never in chat):
+Credentials come from the environment (GitHub Actions secrets in CI —
+never hardcoded, never in chat):
     MT5_LOGIN     account login (number)
     MT5_PASSWORD  trading password
     MT5_SERVER    broker server name (e.g. Exness-MT5Trial16)
 
-Runs on Windows (the MetaTrader5 package is Windows-only). In GitHub
-Actions this runs on a windows-latest runner. A plain MT5 terminal
-install is NOT required: mt5.initialize() with login/password/server
-works against the package's bundled connection in most CI setups; if it
-fails, last_error() is printed so the run log shows exactly why.
+Runs on Windows (the MetaTrader5 package is Windows-only) and REQUIRES
+a locally installed MetaTrader 5 terminal: the Python package talks to
+the terminal over IPC. The workflow installs the terminal first
+(official MetaQuotes installer). Run #1 (2026-10-22) proved this the
+hard way: without a terminal, initialize() fails with
+(-10003, 'IPC initialize failed, MetaTrader 5 x64 not found').
 
 Exit codes: 0 = login proof OK, 1 = setup/initialize/login failure.
 """
 
 import os
 import sys
+import time
+
+TERMINAL_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+INIT_ATTEMPTS = 3
+INIT_RETRY_DELAY_S = 15
 
 
 def fail(message: str) -> "SystemExit":
@@ -62,12 +68,33 @@ def main() -> int:
 
     print(f"Connecting: login={login} server={server} ...", flush=True)
 
-    if not mt5.initialize(login=login, password=password, server=server):
-        print(f"mt5.initialize() failed: {mt5.last_error()}", flush=True)
+    init_kwargs = dict(login=login, password=password, server=server,
+                       timeout=180000)
+    if os.path.exists(TERMINAL_PATH):
+        init_kwargs["path"] = TERMINAL_PATH
+        print(f"Using terminal: {TERMINAL_PATH}", flush=True)
+    else:
+        print(f"Terminal not found at {TERMINAL_PATH}; "
+              "letting the package locate it.", flush=True)
+
+    ok = False
+    for attempt in range(1, INIT_ATTEMPTS + 1):
+        if mt5.initialize(**init_kwargs):
+            ok = True
+            break
+        print(f"mt5.initialize() attempt {attempt} failed: "
+              f"{mt5.last_error()}", flush=True)
         try:
             mt5.shutdown()
         except Exception:
             pass
+        if attempt < INIT_ATTEMPTS:
+            print(f"Retrying in {INIT_RETRY_DELAY_S}s ...", flush=True)
+            time.sleep(INIT_RETRY_DELAY_S)
+
+    if not ok:
+        print("All initialize() attempts failed (see errors above).",
+              flush=True)
         return 1
 
     try:
