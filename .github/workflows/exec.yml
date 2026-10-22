@@ -1,0 +1,43 @@
+# MT5 Login Proof — Milestone 1 of the free MT5 execution arm.
+#
+# Manual trigger only (workflow_dispatch): nothing runs on a schedule
+# and nothing runs on push. The job logs in, prints account info, and
+# confirms the account is a DEMO account. It never places an order.
+#
+# Placement (later, when raymond approves): copy this file into the
+# repo at .github/workflows/exec.yml, with login_proof.py at repo root
+# (or adjust the run path below to match).
+#
+# Required repo secrets (Settings > Secrets and variables > Actions),
+# added by raymond himself — never in code, never in chat:
+#   MT5_LOGIN     e.g. 472776274
+#   MT5_PASSWORD  trading password
+#   MT5_SERVER    e.g. Exness-MT5Trial16
+
+name: MT5 Login Proof
+
+on:
+  workflow_dispatch:
+
+jobs:
+  login-proof:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install MetaTrader5 package
+        run: pip install MetaTrader5
+
+      - name: Run login proof (no trading)
+        env:
+          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+        run: python login_proof.py
