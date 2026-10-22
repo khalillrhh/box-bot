@@ -2,26 +2,30 @@
 """
 MT5 Executor — Milestone 1: LOGIN PROOF ONLY.
 
-Logs in to the account described by environment variables, prints the
-account info, verifies the account is a DEMO account, and shuts down.
+Prints the logged-in account info, verifies the account is a DEMO
+account, and shuts down. There is deliberately NO order function in
+this file — nothing is traded, opened, modified, or closed.
 
-There is deliberately NO order function in this file. Milestone 1 proves
-the connection only — nothing is traded, opened, modified, or closed.
+How the login happens (v3, after two failed runs taught us the shape):
+  - The workflow installs the MetaTrader 5 terminal, then launches it
+    with a startup config (built from secrets, kept outside the repo)
+    so the TERMINAL logs itself into the account, and waits ~2 min
+    for first-run init/update to settle.
+  - This script first tries to ATTACH to that already-running,
+    already-logged-in terminal (initialize with the terminal path,
+    no credentials).
+  - If no account is logged in, it falls back to a credential
+    initialize() with the env secrets, with retries.
 
-Credentials come from the environment (GitHub Actions secrets in CI —
-never hardcoded, never in chat):
-    MT5_LOGIN     account login (number)
-    MT5_PASSWORD  trading password
-    MT5_SERVER    broker server name (e.g. Exness-MT5Trial16)
+Run history:
+  #1 (-10003 'MetaTrader 5 x64 not found') — no terminal installed.
+  #2 (-10005 'IPC timeout' x3) — terminal installed but cold-started
+     by Python; first-run init/wizard kept IPC from ever coming up.
 
-Runs on Windows (the MetaTrader5 package is Windows-only) and REQUIRES
-a locally installed MetaTrader 5 terminal: the Python package talks to
-the terminal over IPC. The workflow installs the terminal first
-(official MetaQuotes installer). Run #1 (2026-10-22) proved this the
-hard way: without a terminal, initialize() fails with
-(-10003, 'IPC initialize failed, MetaTrader 5 x64 not found').
+Credentials come from the environment (GitHub Actions secrets —
+never hardcoded, never in chat): MT5_LOGIN, MT5_PASSWORD, MT5_SERVER.
 
-Exit codes: 0 = login proof OK, 1 = setup/initialize/login failure.
+Exit codes: 0 = login proof OK, 1 = any failure.
 """
 
 import os
@@ -36,6 +40,44 @@ INIT_RETRY_DELAY_S = 15
 def fail(message: str) -> "SystemExit":
     print(f"ERROR: {message}", flush=True)
     return SystemExit(1)
+
+
+def report_account(mt5) -> int:
+    """Print the account block; return 0 iff a DEMO/CONTEST account."""
+    info = mt5.account_info()
+    if info is None:
+        print(f"mt5.account_info() returned None: {mt5.last_error()}", flush=True)
+        return 1
+
+    # trade_mode values (ENUM_ACCOUNT_TRADE_MODE):
+    #   0 = DEMO, 1 = CONTEST, 2 = REAL
+    trade_mode_names = {0: "DEMO", 1: "CONTEST", 2: "REAL"}
+    trade_mode = getattr(info, "trade_mode", None)
+    trade_mode_label = trade_mode_names.get(trade_mode, f"UNKNOWN ({trade_mode})")
+
+    print("=" * 56)
+    print("MT5 ACCOUNT INFO")
+    print("=" * 56)
+    print(f"login:      {info.login}")
+    print(f"server:     {info.server}")
+    print(f"balance:    {info.balance}")
+    print(f"equity:     {info.equity}")
+    print(f"currency:   {info.currency}")
+    print(f"trade_mode: {trade_mode} ({trade_mode_label})")
+    print(f"leverage:   {info.leverage}")
+    name = getattr(info, "name", "")
+    if name:
+        print(f"name:       {name}")
+    print("=" * 56)
+
+    if trade_mode in (0, 1):
+        print("*** DEMO ACCOUNT CONFIRMED ***")
+        return 0
+
+    print("*** WARNING: NOT A DEMO ACCOUNT ***")
+    print("Milestone 1 expects a DEMO account. Stopping here —")
+    print("no further action taken (this script never trades).")
+    return 1
 
 
 def main() -> int:
@@ -66,77 +108,57 @@ def main() -> int:
             "after `pip install MetaTrader5`."
         )
 
-    print(f"Connecting: login={login} server={server} ...", flush=True)
-
-    init_kwargs = dict(login=login, password=password, server=server,
-                       timeout=180000)
+    path_kw = {}
     if os.path.exists(TERMINAL_PATH):
-        init_kwargs["path"] = TERMINAL_PATH
+        path_kw["path"] = TERMINAL_PATH
         print(f"Using terminal: {TERMINAL_PATH}", flush=True)
-    else:
-        print(f"Terminal not found at {TERMINAL_PATH}; "
-              "letting the package locate it.", flush=True)
-
-    ok = False
-    for attempt in range(1, INIT_ATTEMPTS + 1):
-        if mt5.initialize(**init_kwargs):
-            ok = True
-            break
-        print(f"mt5.initialize() attempt {attempt} failed: "
-              f"{mt5.last_error()}", flush=True)
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
-        if attempt < INIT_ATTEMPTS:
-            print(f"Retrying in {INIT_RETRY_DELAY_S}s ...", flush=True)
-            time.sleep(INIT_RETRY_DELAY_S)
-
-    if not ok:
-        print("All initialize() attempts failed (see errors above).",
-              flush=True)
-        return 1
 
     try:
-        info = mt5.account_info()
-        if info is None:
-            print(f"mt5.account_info() returned None: {mt5.last_error()}", flush=True)
-            return 1
+        # --- Path A: attach to the terminal the workflow pre-launched
+        # (it logged itself in via the startup config).
+        print("Attach attempt: initialize() against running terminal ...",
+              flush=True)
+        if mt5.initialize(**path_kw):
+            info = mt5.account_info()
+            if info is not None and getattr(info, "login", None):
+                print(f"Attached. Terminal already logged in as "
+                      f"{info.login}.", flush=True)
+                return report_account(mt5)
+            print("Attached but no account logged in; "
+                  "falling back to credential login.", flush=True)
+            mt5.shutdown()
+        else:
+            print(f"Attach failed: {mt5.last_error()}", flush=True)
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
 
-        # trade_mode values (ENUM_ACCOUNT_TRADE_MODE):
-        #   0 = ACCOUNT_TRADE_MODE_DEMO
-        #   1 = ACCOUNT_TRADE_MODE_CONTEST
-        #   2 = ACCOUNT_TRADE_MODE_REAL
-        trade_mode_names = {0: "DEMO", 1: "CONTEST", 2: "REAL"}
-        trade_mode = getattr(info, "trade_mode", None)
-        trade_mode_label = trade_mode_names.get(trade_mode, f"UNKNOWN ({trade_mode})")
+        # --- Path B: credential initialize, with retries.
+        print(f"Credential login: login={login} server={server} ...",
+              flush=True)
+        for attempt in range(1, INIT_ATTEMPTS + 1):
+            if mt5.initialize(login=login, password=password,
+                              server=server, timeout=120000, **path_kw):
+                return report_account(mt5)
+            print(f"initialize() attempt {attempt} failed: "
+                  f"{mt5.last_error()}", flush=True)
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+            if attempt < INIT_ATTEMPTS:
+                print(f"Retrying in {INIT_RETRY_DELAY_S}s ...", flush=True)
+                time.sleep(INIT_RETRY_DELAY_S)
 
-        print("=" * 56)
-        print("MT5 ACCOUNT INFO")
-        print("=" * 56)
-        print(f"login:      {info.login}")
-        print(f"server:     {info.server}")
-        print(f"balance:    {info.balance}")
-        print(f"equity:     {info.equity}")
-        print(f"currency:   {info.currency}")
-        print(f"trade_mode: {trade_mode} ({trade_mode_label})")
-        print(f"leverage:   {info.leverage}")
-        name = getattr(info, "name", "")
-        if name:
-            print(f"name:       {name}")
-        print("=" * 56)
-
-        if trade_mode in (0, 1):
-            print("*** DEMO ACCOUNT CONFIRMED ***")
-            return 0
-
-        print("*** WARNING: NOT A DEMO ACCOUNT ***")
-        print("Milestone 1 expects a DEMO account. Stopping here —")
-        print("no further action taken (this script never trades).")
+        print("All login attempts failed (see errors above).", flush=True)
         return 1
     finally:
-        mt5.shutdown()
-        print("MT5 connection closed (mt5.shutdown()).", flush=True)
+        try:
+            mt5.shutdown()
+            print("MT5 connection closed (mt5.shutdown()).", flush=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
