@@ -1,15 +1,16 @@
 # MT5 Login Proof — Milestone 1 of the free MT5 execution arm.
 #
 # Manual trigger only (workflow_dispatch): nothing runs on a schedule
-# and nothing runs on push. The job logs in, prints account info, and
-# confirms the account is a DEMO account. It never places an order.
+# and nothing runs on push. The job installs the MetaTrader 5 terminal
+# (required: the Python package talks to a local terminal over IPC —
+# run #1 failed with -10003 'MetaTrader 5 x64 not found' without it),
+# then logs in, prints account info, and confirms the account is a
+# DEMO account. It never places an order.
 #
-# Placement (later, when raymond approves): copy this file into the
-# repo at .github/workflows/exec.yml, with login_proof.py at repo root
-# (or adjust the run path below to match).
+# Lives in the repo at .github/workflows/exec.yml, with login_proof.py
+# at repo root.
 #
-# Required repo secrets (Settings > Secrets and variables > Actions),
-# added by raymond himself — never in code, never in chat:
+# Required repo secrets (Settings > Secrets and variables > Actions):
 #   MT5_LOGIN     e.g. 472776274
 #   MT5_PASSWORD  trading password
 #   MT5_SERVER    e.g. Exness-MT5Trial16
@@ -34,6 +35,21 @@ jobs:
 
       - name: Install MetaTrader5 package
         run: pip install MetaTrader5
+
+      - name: Install MetaTrader 5 terminal (official MetaQuotes installer)
+        shell: powershell
+        run: |
+          $url = "https://download.mql5.com/cdn/web/metaquotes.ltd/mt5/mt5setup.exe"
+          $setup = "$env:RUNNER_TEMP\mt5setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          Start-Process -FilePath $setup -ArgumentList "/auto" -Wait
+          $term = "C:\Program Files\MetaTrader 5\terminal64.exe"
+          if (Test-Path $term) { Write-Host "Terminal installed: $term" }
+          else { Write-Error "terminal64.exe not found after install"; exit 1 }
+          # The installer may auto-launch the terminal once; stop it so the
+          # Python package starts its own instance cleanly.
+          Stop-Process -Name terminal64 -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
 
       - name: Run login proof (no trading)
         env:
